@@ -573,6 +573,12 @@ func TestAcquire_WorktreePathSkipsAnOccupiedCandidate(t *testing.T) {
 	if !strings.Contains(warnings, occupied) || !strings.Contains(warnings, "skipped slot 1") {
 		t.Errorf("stderr %q does not report the skipped slot and its occupied path", warnings)
 	}
+	// The occupant is never read, so the warning must not advise deleting it.
+	for _, unwanted := range []string{"remove", "delete"} {
+		if strings.Contains(warnings, unwanted) {
+			t.Errorf("stderr %q tells the operator to %q a directory treehouse never inspected", warnings, unwanted)
+		}
+	}
 	if entries, err := os.ReadDir(occupied); err != nil || len(entries) != 0 {
 		t.Errorf("expected the occupied directory left untouched, entries %v err %v", entries, err)
 	}
