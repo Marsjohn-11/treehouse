@@ -295,35 +295,36 @@ func LeaseExisting(poolDir, name, holder string) (LeaseInfo, error) {
 	return lease, err
 }
 
-// occupiedPathAdvice explains a templated path treehouse refuses to adopt. A
-// path where this repository already has a worktree is one the pool lost track
-// of - state recovery reads the pool directory only, so a worktree placed
-// outside it comes back unknown while it is still on disk and registered - and
-// every later acquisition resolves to the same name and refuses again. It says
-// so and points at the repository's own worktree list rather than prescribing a
-// command, because which command applies depends on state treehouse cannot see
-// from here. Any other occupant belongs to someone else and is not described as
-// treehouse's to inspect or delete.
-func occupiedPathAdvice(repoRoot, wtPath string) string {
-	if !registeredWorktreeOfRepo(repoRoot, wtPath) {
-		return "move it aside or choose a template that cannot collide with another repository's pool"
+// freeTemplatedSlot picks the name and path a new templated worktree is created
+// under, skipping every candidate whose path something already occupies.
+// treehouse never adopts an existing directory, and a templated path can be one
+// the pool no longer records - state recovery reads the pool directory only, so
+// an out-of-pool worktree survives a lost state file while name allocation
+// restarts at the first name. Refusing that one name would hand out nothing at
+// all; skipping it keeps the pool usable while the operator clears the
+// leftovers. Only when every candidate is occupied does the acquisition fail,
+// pointing at the repository's own worktree list rather than prescribing a
+// command whose preconditions treehouse cannot see from here.
+func freeTemplatedSlot(repoRoot, poolDir string, state State, poolSize int, opts acquireOptions) (string, string, error) {
+	first := nextSlotNumber(state)
+	var occupied []string
+	for n := first; n < first+poolSize; n++ {
+		name := strconv.Itoa(n)
+		wtPath, err := resolveWorktreePath(repoRoot, poolDir, name, opts.worktreePath, opts.uniqueLeaf)
+		if err != nil {
+			return "", "", err
+		}
+		_, statErr := os.Lstat(wtPath)
+		if os.IsNotExist(statErr) {
+			return name, wtPath, nil
+		}
+		if statErr != nil {
+			return "", "", statErr
+		}
+		occupied = append(occupied, wtPath)
 	}
-	return fmt.Sprintf("%s is registered as a worktree of this repository that pool state no longer records; list them with 'git worktree list' in %s and see the README section on recovering missing pool state to decide what to do with it",
-		wtPath, repoRoot)
-}
-
-// registeredWorktreeOfRepo reports whether the worktree at path belongs to this
-// repository, read from the path's own marker so a worktree of some other
-// repository is never mistaken for ours.
-func registeredWorktreeOfRepo(repoRoot, path string) bool {
-	if vcs.WorktreeBackendName(path) == "" {
-		return false
-	}
-	mainRoot, err := vcs.FindMainRepoRootFrom(path)
-	if err != nil {
-		return false
-	}
-	return samePath(mainRoot, repoRoot)
+	return "", "", fmt.Errorf("every worktree path this pool would create already exists (%d checked, %s through %s); treehouse only creates a worktree at a path it can own and never adopts an existing directory. List this repository's worktrees with 'git worktree list' in %s and see the README section on recovering missing pool state to decide what to do with them",
+		len(occupied), occupied[0], occupied[len(occupied)-1], repoRoot)
 }
 
 func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts acquireOptions) (LeaseInfo, error) {
@@ -370,11 +371,12 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		}
 
 		// The name this pool would allocate next, and where the template puts it,
-		// resolved before the reuse loop and used by the creation branch below.
-		// A recycling acquisition never expands the template, so placement rules
-		// reached only from that branch would report a template that escapes into
-		// the repository or the pool, or accept it silently, depending on how full
-		// the pool is.
+		// resolved before the reuse loop so a recycling acquisition still reports a
+		// template that escapes into the repository or the pool - that branch never
+		// expands the template, so placement rules reached only from the creation
+		// branch would accept a bad template or reject it depending on how full the
+		// pool is. The creation branch re-resolves a templated path to skip names
+		// whose directories are occupied.
 		name := nextName(state)
 		wtPath, err := resolveWorktreePath(repoRoot, poolDir, name, opts.worktreePath, opts.uniqueLeaf)
 		if err != nil {
@@ -509,13 +511,13 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		// A templated path can point anywhere, including at a directory another
 		// pool or checkout already owns - two pools whose templates agree would
 		// otherwise register the same worktree and each feel free to delete it.
-		// Only the templated path is checked: the built-in layout keeps whatever
-		// AddWorktree does with a leftover directory today.
+		// Occupied candidates are skipped rather than adopted. Only the templated
+		// path is checked: the built-in layout keeps whatever AddWorktree does with
+		// a leftover directory today.
 		if opts.worktreePath != "" {
-			if _, statErr := os.Lstat(wtPath); statErr == nil {
-				return fmt.Errorf("worktree path %q already exists; treehouse only creates a worktree at a path it can own, so %s", wtPath, occupiedPathAdvice(repoRoot, wtPath))
-			} else if !os.IsNotExist(statErr) {
-				return statErr
+			name, wtPath, err = freeTemplatedSlot(repoRoot, poolDir, state, poolSize, opts)
+			if err != nil {
+				return err
 			}
 		}
 
@@ -1147,11 +1149,15 @@ func sameDestroyReservation(current, reserved WorktreeEntry) bool {
 }
 
 func nextName(state State) string {
+	return strconv.Itoa(nextSlotNumber(state))
+}
+
+func nextSlotNumber(state State) int {
 	max := 0
 	for _, wt := range state.Worktrees {
 		if n, err := strconv.Atoi(wt.Name); err == nil && n > max {
 			max = n
 		}
 	}
-	return strconv.Itoa(max + 1)
+	return max + 1
 }

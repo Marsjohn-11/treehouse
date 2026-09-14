@@ -544,52 +544,97 @@ func TestResolveWorktreePath_AllowsASiblingOfThePools(t *testing.T) {
 	}
 }
 
-func TestAcquire_WorktreePathRefusesAnExistingDirectory(t *testing.T) {
+// TestAcquire_WorktreePathSkipsAnOccupiedCandidate covers a directory treehouse
+// does not own sitting where the first candidate name resolves. It is never
+// adopted, but it must not stop the pool from handing out a slot either.
+func TestAcquire_WorktreePathSkipsAnOccupiedCandidate(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
-	occupied := filepath.Join(filepath.Dir(repoDir), "myrepo-1")
+	repoParent := filepath.Dir(repoDir)
+	occupied := filepath.Join(repoParent, "myrepo-1")
 	if err := os.MkdirAll(occupied, 0o755); err != nil {
 		t.Fatal(err)
+	}
+
+	got, err := AcquireWithOptions(repoDir, poolDir, 2, nil, AcquireOptions{
+		WorktreePath: "{repo_parent}/{repo}-{slot}",
+	})
+	if err != nil {
+		t.Fatalf("AcquireWithOptions failed: %v", err)
+	}
+	if want := filepath.Join(repoParent, "myrepo-2"); got != want {
+		t.Fatalf("acquired %s, want the next free candidate %s", got, want)
+	}
+	if entries, err := os.ReadDir(occupied); err != nil || len(entries) != 0 {
+		t.Errorf("expected the occupied directory left untouched, entries %v err %v", entries, err)
+	}
+
+	state, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatalf("ReadState failed: %v", err)
+	}
+	if len(state.Worktrees) != 1 || state.Worktrees[0].Path != got {
+		t.Fatalf("expected only the new slot registered, got %#v", state.Worktrees)
+	}
+}
+
+// TestAcquire_WorktreePathStillAcquiresAfterALostStateFile is the wedge a lost
+// state file used to cause: recovery scans the pool directory only, so an
+// out-of-pool worktree comes back unknown while it is still on disk, and name
+// allocation restarts at the name that resolves to it. The pool must keep
+// handing out slots rather than refuse every acquisition until someone deletes
+// the stray worktree by hand.
+func TestAcquire_WorktreePathStillAcquiresAfterALostStateFile(t *testing.T) {
+	repoDir, poolDir := setupRepo(t)
+	options := AcquireOptions{WorktreePath: "{repo_parent}/{repo}-{slot}"}
+
+	stray, err := AcquireWithOptions(repoDir, poolDir, 2, nil, options)
+	if err != nil {
+		t.Fatalf("AcquireWithOptions failed: %v", err)
+	}
+	if err := os.Remove(stateFilePath(poolDir)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := AcquireWithOptions(repoDir, poolDir, 2, nil, options)
+	if err != nil {
+		t.Fatalf("expected an acquisition after the lost state file, got: %v", err)
+	}
+	if got == stray {
+		t.Fatalf("acquisition adopted the stray worktree at %s", got)
+	}
+	if want := filepath.Join(filepath.Dir(repoDir), "myrepo-2"); got != want {
+		t.Fatalf("acquired %s, want %s", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(stray, ".git")); err != nil {
+		t.Errorf("expected the stray worktree left intact: %v", err)
+	}
+}
+
+// TestAcquire_WorktreePathFailsWhenEveryCandidateIsOccupied is the end of that
+// skipping: with nowhere left to create a worktree the acquisition fails, says
+// so of every candidate rather than one, and registers nothing.
+func TestAcquire_WorktreePathFailsWhenEveryCandidateIsOccupied(t *testing.T) {
+	repoDir, poolDir := setupRepo(t)
+	repoParent := filepath.Dir(repoDir)
+	for _, leaf := range []string{"myrepo-1", "myrepo-2"} {
+		if err := os.MkdirAll(filepath.Join(repoParent, leaf), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	_, err := AcquireWithOptions(repoDir, poolDir, 2, nil, AcquireOptions{
 		WorktreePath: "{repo_parent}/{repo}-{slot}",
 	})
 	if err == nil {
-		t.Fatal("expected an acquisition onto an existing directory to fail")
+		t.Fatal("expected the acquisition to fail with every candidate path occupied")
 	}
-	if !strings.Contains(err.Error(), quotedPath(occupied)) {
-		t.Errorf("error %q does not name the occupied path", err)
-	}
-
-	state, readErr := ReadState(poolDir)
-	if readErr == nil && len(state.Worktrees) != 0 {
-		t.Errorf("expected no slot to be registered, got %#v", state.Worktrees)
-	}
-}
-
-// TestAcquire_WorktreePathOccupiedByOurOwnWorktreeExplainsWhy covers the state a
-// lost state file leaves an out-of-pool worktree in: recovery scans the pool
-// directory only, so the worktree comes back unknown while it is still on disk
-// and still registered, and every later acquisition resolves to the same name and
-// refuses the same path. The refusal has to say what the occupant is, and must
-// not prescribe a command whose preconditions it cannot see from here.
-func TestAcquire_WorktreePathOccupiedByOurOwnWorktreeExplainsWhy(t *testing.T) {
-	repoDir, poolDir := setupRepo(t)
-	options := AcquireOptions{WorktreePath: "{repo_parent}/{repo}-{slot}"}
-
-	occupied, err := AcquireWithOptions(repoDir, poolDir, 2, nil, options)
-	if err != nil {
-		t.Fatalf("AcquireWithOptions failed: %v", err)
-	}
-	if err := os.WriteFile(stateFilePath(poolDir), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = AcquireWithOptions(repoDir, poolDir, 2, nil, options)
-	if err == nil {
-		t.Fatal("expected the acquisition to refuse the occupied path")
-	}
-	for _, want := range []string{occupied, "already exists", "registered as a worktree of this repository", "git worktree list"} {
+	for _, want := range []string{
+		"every worktree path this pool would create already exists",
+		filepath.Join(repoParent, "myrepo-1"),
+		filepath.Join(repoParent, "myrepo-2"),
+		"never adopts an existing directory",
+		"git worktree list",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -599,30 +644,10 @@ func TestAcquire_WorktreePathOccupiedByOurOwnWorktreeExplainsWhy(t *testing.T) {
 			t.Errorf("error %q prescribes %q, whose preconditions treehouse cannot check here", err, unwanted)
 		}
 	}
-}
 
-// TestAcquire_WorktreePathOccupiedBySomeoneElseKeepsQuiet is the other half: a
-// directory treehouse does not own must not be described as its to inspect.
-func TestAcquire_WorktreePathOccupiedBySomeoneElseKeepsQuiet(t *testing.T) {
-	repoDir, poolDir := setupRepo(t)
-	occupied := filepath.Join(filepath.Dir(repoDir), "myrepo-1")
-	if err := os.MkdirAll(occupied, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := AcquireWithOptions(repoDir, poolDir, 2, nil, AcquireOptions{
-		WorktreePath: "{repo_parent}/{repo}-{slot}",
-	})
-	if err == nil {
-		t.Fatal("expected the acquisition to refuse the occupied path")
-	}
-	if !strings.Contains(err.Error(), "move it aside") {
-		t.Errorf("error %q does not tell the user to move the directory aside", err)
-	}
-	for _, unwanted := range []string{"registered as a worktree of this repository", "git worktree list", "git worktree remove", "treehouse destroy"} {
-		if strings.Contains(err.Error(), unwanted) {
-			t.Errorf("error %q says %q for a directory treehouse does not own", err, unwanted)
-		}
+	state, readErr := ReadState(poolDir)
+	if readErr == nil && len(state.Worktrees) != 0 {
+		t.Errorf("expected no slot to be registered, got %#v", state.Worktrees)
 	}
 }
 
