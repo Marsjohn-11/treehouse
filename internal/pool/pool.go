@@ -302,9 +302,10 @@ func LeaseExisting(poolDir, name, holder string) (LeaseInfo, error) {
 // an out-of-pool worktree survives a lost state file while name allocation
 // restarts at the first name. Refusing that one name would hand out nothing at
 // all; skipping it keeps the pool usable while the operator clears the
-// leftovers. Only when every candidate is occupied does the acquisition fail,
-// pointing at the repository's own worktree list rather than prescribing a
-// command whose preconditions treehouse cannot see from here.
+// leftovers. Each skip is warned about on stderr, so the leftover is visible
+// while removing it is still cheap. Only when every candidate is occupied does
+// the acquisition fail, pointing at the repository's own worktree list rather
+// than prescribing a command whose preconditions treehouse cannot see from here.
 func freeTemplatedSlot(repoRoot, poolDir string, state State, poolSize int, opts acquireOptions) (string, string, error) {
 	first := nextSlotNumber(state)
 	var occupied []string
@@ -321,6 +322,7 @@ func freeTemplatedSlot(repoRoot, poolDir string, state State, poolSize int, opts
 		if statErr != nil {
 			return "", "", statErr
 		}
+		fmt.Fprintf(os.Stderr, "🌳 Warning: skipped slot %s because %s already exists; treehouse never adopts an existing directory, so remove it to free that slot name.\n", name, wtPath)
 		occupied = append(occupied, wtPath)
 	}
 	return "", "", fmt.Errorf("every worktree path this pool would create already exists (%d checked, %s through %s); treehouse only creates a worktree at a path it can own and never adopts an existing directory. List this repository's worktrees with 'git worktree list' in %s and see the README section on recovering missing pool state to decide what to do with them",
@@ -370,16 +372,21 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			return err
 		}
 
-		// The name this pool would allocate next, and where the template puts it,
-		// resolved before the reuse loop so a recycling acquisition still reports a
-		// template that escapes into the repository or the pool - that branch never
-		// expands the template, so placement rules reached only from the creation
-		// branch would accept a bad template or reject it depending on how full the
-		// pool is. The creation branch re-resolves a templated path to skip names
-		// whose directories are occupied.
+		// Placement rules run before the reuse loop so a recycling acquisition
+		// still reports a template that escapes into the repository or the pool -
+		// that branch never expands the template, so rules reached only from the
+		// creation branch would accept a bad template or reject it depending on how
+		// full the pool is. A template is only validated here; the creation branch
+		// resolves the path it actually uses, skipping names whose directories are
+		// occupied.
 		name := nextName(state)
-		wtPath, err := resolveWorktreePath(repoRoot, poolDir, name, opts.worktreePath, opts.uniqueLeaf)
-		if err != nil {
+		var wtPath string
+		if opts.worktreePath == "" {
+			wtPath, err = resolveWorktreePath(repoRoot, poolDir, name, "", opts.uniqueLeaf)
+			if err != nil {
+				return err
+			}
+		} else if _, err := resolveWorktreePath(repoRoot, poolDir, name, opts.worktreePath, opts.uniqueLeaf); err != nil {
 			return err
 		}
 

@@ -546,7 +546,9 @@ func TestResolveWorktreePath_AllowsASiblingOfThePools(t *testing.T) {
 
 // TestAcquire_WorktreePathSkipsAnOccupiedCandidate covers a directory treehouse
 // does not own sitting where the first candidate name resolves. It is never
-// adopted, but it must not stop the pool from handing out a slot either.
+// adopted, but it must not stop the pool from handing out a slot either, and the
+// skip is warned about so the leftover does not go unnoticed until the pool runs
+// out of candidates.
 func TestAcquire_WorktreePathSkipsAnOccupiedCandidate(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 	repoParent := filepath.Dir(repoDir)
@@ -555,14 +557,21 @@ func TestAcquire_WorktreePathSkipsAnOccupiedCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := AcquireWithOptions(repoDir, poolDir, 2, nil, AcquireOptions{
-		WorktreePath: "{repo_parent}/{repo}-{slot}",
+	var got string
+	var err error
+	warnings := captureStderr(t, func() {
+		got, err = AcquireWithOptions(repoDir, poolDir, 2, nil, AcquireOptions{
+			WorktreePath: "{repo_parent}/{repo}-{slot}",
+		})
 	})
 	if err != nil {
 		t.Fatalf("AcquireWithOptions failed: %v", err)
 	}
 	if want := filepath.Join(repoParent, "myrepo-2"); got != want {
 		t.Fatalf("acquired %s, want the next free candidate %s", got, want)
+	}
+	if !strings.Contains(warnings, occupied) || !strings.Contains(warnings, "skipped slot 1") {
+		t.Errorf("stderr %q does not report the skipped slot and its occupied path", warnings)
 	}
 	if entries, err := os.ReadDir(occupied); err != nil || len(entries) != 0 {
 		t.Errorf("expected the occupied directory left untouched, entries %v err %v", entries, err)
