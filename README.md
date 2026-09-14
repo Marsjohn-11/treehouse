@@ -499,6 +499,7 @@ A few things worth knowing:
 - **It only names slots treehouse creates from now on.** A worktree already in the pool keeps the path recorded in pool state: turning the option on never moves, renames, or invalidates one. To convert an existing pool, `treehouse destroy` its slots and re-acquire.
 - **The name is stable.** The slot number is part of the leaf, so a slot recycled by a later `get` hands back the same path it had before.
 - **Both layouts coexist in one pool.** Status, prune, destroy, and lease handling read paths from pool state and never assume the leaf, so slots created before and after the opt-in live side by side.
+
 ### Worktree path
 
 New pool slots are created at `{pool}/{slot}/{repo}`, for example `~/.treehouse/myapp-a1b2c3/1/myapp`.
